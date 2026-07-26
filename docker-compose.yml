@@ -1,0 +1,18 @@
+services:
+  acme-people:
+    build:
+      context: .
+    image: bastiongate/acme-people-demo:local
+    ports:
+      - "${ACME_PEOPLE_PORT:-3000}:3000"
+    environment:
+      LISTEN_ADDR: ":3000"
+      BASTIONGATE_API_KEY: "${BASTIONGATE_API_KEY:?Set BASTIONGATE_API_KEY in .env}"
+      BASTIONGATE_INTERNAL_URL: "${BASTIONGATE_INTERNAL_URL:-http://host.docker.internal:8080}"
+      BASTIONGATE_PUBLIC_URL: "${BASTIONGATE_PUBLIC_URL:-http://localhost:8080}"
+      BASTIONGATE_POLICY_CODE: "${BASTIONGATE_POLICY_CODE:-DEFAULT}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    init: true
+    restart: "no"
+

@@ -1,0 +1,12 @@
+.env
+.git
+.gitignore
+.idea
+.playwright-cli
+.serena
+.superpowers
+node_modules
+output
+playwright-report
+test-results
+
