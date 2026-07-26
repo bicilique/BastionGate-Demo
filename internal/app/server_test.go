@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/bicilique/BastionGate-Demo/internal/app"
@@ -136,6 +137,145 @@ func TestAcceptedUploadRemainsUntrusted(t *testing.T) {
 	}
 }
 
+func TestUploadRejectsFilesOverConfiguredLimit(t *testing.T) {
+	t.Parallel()
+
+	var upstreamRequested atomic.Bool
+	bastionGate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamRequested.Store(true)
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = io.WriteString(w, `{"fileId":"must-not-be-used"}`)
+	}))
+	defer bastionGate.Close()
+
+	handler, err := app.NewHandler(app.Config{
+		BastionGateInternalURL: bastionGate.URL,
+		BastionGateAPIKey:      "server-only-secret",
+		MaxUploadBytes:         8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	var requestBody bytes.Buffer
+	form := multipart.NewWriter(&requestBody)
+	part, err := form.CreateFormFile("file", "profile.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(part, "nine-byte")
+	_ = form.Close()
+
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/uploads", &requestBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", form.FormDataContentType())
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+
+	if response.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413; body=%s", response.StatusCode, body)
+	}
+	if !bytes.Contains(body, []byte(`"code":"FILE_TOO_LARGE"`)) {
+		t.Fatalf("unexpected problem response: %s", body)
+	}
+	if !upstreamRequested.Load() {
+		t.Fatal("streaming facade did not begin the BastionGate request")
+	}
+}
+
+func TestUploadResponseRedactsSecretsAndDoesNotReflectUpstreamErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("accepted metadata", func(t *testing.T) {
+		bastionGate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = io.WriteString(w, `{
+				"fileId":"safe-file-id",
+				"status":"QUEUED",
+				"api_key":"must-never-leak",
+				"storage_credentials":{"password":"must-never-leak"}
+			}`)
+		}))
+		defer bastionGate.Close()
+
+		response := postTestUpload(t, bastionGate.URL)
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		if response.StatusCode != http.StatusAccepted {
+			t.Fatalf("status = %d; body=%s", response.StatusCode, body)
+		}
+		if bytes.Contains(body, []byte("must-never-leak")) ||
+			bytes.Contains(body, []byte("api_key")) ||
+			bytes.Contains(body, []byte("storage_credentials")) {
+			t.Fatalf("accepted response leaked upstream metadata: %s", body)
+		}
+	})
+
+	t.Run("rejected message", func(t *testing.T) {
+		bastionGate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"message":"invalid api_key=must-never-leak"}`)
+		}))
+		defer bastionGate.Close()
+
+		response := postTestUpload(t, bastionGate.URL)
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d; body=%s", response.StatusCode, body)
+		}
+		if bytes.Contains(body, []byte("must-never-leak")) {
+			t.Fatalf("problem response reflected upstream message: %s", body)
+		}
+	})
+}
+
+func postTestUpload(t *testing.T, bastionGateURL string) *http.Response {
+	t.Helper()
+
+	handler, err := app.NewHandler(app.Config{
+		BastionGateInternalURL: bastionGateURL,
+		BastionGateAPIKey:      "server-only-secret",
+		MaxUploadBytes:         2 << 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	var requestBody bytes.Buffer
+	form := multipart.NewWriter(&requestBody)
+	part, err := form.CreateFormFile("file", "profile.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(part, "safe-image-bytes")
+	_ = form.Close()
+
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/uploads", &requestBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", form.FormDataContentType())
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
 func TestBlockedFileCannotBeDownloaded(t *testing.T) {
 	t.Parallel()
 
@@ -260,6 +400,8 @@ func TestReportRedactsStorageAndCredentialFields(t *testing.T) {
 			"fileId":"`+fileID+`",
 			"status":"BLOCKED",
 			"finalVerdict":"MALICIOUS",
+			"accessToken":"must-never-leak",
+			"password":"must-never-leak",
 			"quarantine":{
 				"status":"ACTIVE",
 				"quarantineBucket":"private-bucket",
@@ -397,6 +539,43 @@ func TestHealthReportsBastionGateConnectionWithoutCredentials(t *testing.T) {
 	}
 	if bytes.Contains(body, []byte("server-only-secret")) || bytes.Contains(body, []byte(bastionGate.URL)) {
 		t.Fatalf("health response leaked internal configuration: %s", body)
+	}
+}
+
+func TestDemoConfigExposesOnlyBrowserSafeSettings(t *testing.T) {
+	t.Parallel()
+
+	handler, err := app.NewHandler(app.Config{
+		BastionGateInternalURL: "http://internal-bastiongate:8080",
+		BastionGatePublicURL:   "https://audit.example.test",
+		BastionGateAPIKey:      "server-only-secret",
+		PolicyCode:             "PROFILE_PHOTO",
+		MaxUploadBytes:         512_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/api/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", response.StatusCode, body)
+	}
+	if !bytes.Contains(body, []byte(`"policyCode":"PROFILE_PHOTO"`)) ||
+		!bytes.Contains(body, []byte(`"maxUploadBytes":512000`)) {
+		t.Fatalf("safe config is incomplete: %s", body)
+	}
+	for _, forbidden := range []string{"server-only-secret", "internal-bastiongate", "audit.example.test"} {
+		if bytes.Contains(body, []byte(forbidden)) {
+			t.Fatalf("config leaked %q: %s", forbidden, body)
+		}
 	}
 }
 

@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -14,6 +13,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,6 +21,8 @@ import (
 )
 
 const responseLimit = 1 << 20
+
+var errFileTooLarge = errors.New("file exceeds configured upload limit")
 
 type Config struct {
 	BastionGateInternalURL string
@@ -54,6 +56,7 @@ func NewHandler(config Config) (http.Handler, error) {
 		client: &http.Client{Timeout: 30 * time.Second},
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/config", s.handleConfig)
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("POST /api/uploads", s.handleUpload)
 	mux.HandleFunc("GET /api/files/{fileID}/status", s.handleStatus)
@@ -61,6 +64,13 @@ func NewHandler(config Config) (http.Handler, error) {
 	mux.HandleFunc("GET /api/files/{fileID}/download", s.handleDownload)
 	mux.Handle("/", http.FileServer(http.FS(webassets.Files)))
 	return secureHeaders(mux), nil
+}
+
+func (s *server) handleConfig(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"maxUploadBytes": s.config.MaxUploadBytes,
+		"policyCode":     s.config.PolicyCode,
+	})
 }
 
 func secureHeaders(next http.Handler) http.Handler {
@@ -101,25 +111,39 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, s.config.MaxUploadBytes+(64<<10))
-	if err := r.ParseMultipartForm(s.config.MaxUploadBytes); err != nil {
+	reader, err := r.MultipartReader()
+	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "INVALID_MULTIPART", "A valid multipart file is required.")
 		return
 	}
 
-	file, header, err := r.FormFile("file")
-	if err != nil {
+	var file *multipart.Part
+	for {
+		part, nextErr := reader.NextPart()
+		if errors.As(nextErr, new(*http.MaxBytesError)) {
+			writeProblem(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", uploadLimitMessage(s.config.MaxUploadBytes))
+			return
+		}
+		if nextErr == io.EOF {
+			break
+		}
+		if nextErr != nil {
+			writeProblem(w, http.StatusBadRequest, "INVALID_MULTIPART", "A valid multipart file is required.")
+			return
+		}
+		if part.FormName() == "file" && part.FileName() != "" {
+			file = part
+			break
+		}
+		_ = part.Close()
+	}
+	if file == nil {
 		writeProblem(w, http.StatusBadRequest, "FILE_REQUIRED", "Select a file to upload.")
 		return
 	}
 	defer file.Close()
-
-	fileBytes, err := io.ReadAll(io.LimitReader(file, s.config.MaxUploadBytes+1))
-	if err != nil {
-		writeProblem(w, http.StatusBadRequest, "FILE_READ_FAILED", "The selected file could not be read.")
-		return
-	}
-	if int64(len(fileBytes)) > s.config.MaxUploadBytes {
-		writeProblem(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", "Profile photos are limited to 2 MiB.")
+	if !supportedImageName(file.FileName()) {
+		writeProblem(w, http.StatusUnsupportedMediaType, "UNSUPPORTED_FILE_TYPE", "Choose a JPG or PNG profile photo.")
 		return
 	}
 
@@ -129,17 +153,12 @@ func (s *server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sourceReference := "acme-profile-" + correlationID
-	upstreamBody, contentType, err := buildUpstreamUpload(
-		header.Filename,
-		header.Header.Get("Content-Type"),
-		fileBytes,
+	upstreamBody, contentType, streamResult := streamUpstreamUpload(
+		file,
 		s.config.PolicyCode,
 		sourceReference,
+		s.config.MaxUploadBytes,
 	)
-	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "UPLOAD_BUILD_FAILED", "The upload could not be prepared.")
-		return
-	}
 
 	upstreamURL := strings.TrimRight(s.config.BastionGateInternalURL, "/") + "/api/v1/files/upload"
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, upstreamBody)
@@ -152,8 +171,27 @@ func (s *server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	request.Header.Set("Content-Type", contentType)
 	request.Header.Set("Accept", "application/json")
 
-	response, err := s.client.Do(request)
-	if err != nil {
+	response, requestErr := s.client.Do(request)
+	streamErr := <-streamResult
+	if errors.Is(streamErr, errFileTooLarge) {
+		if response != nil {
+			response.Body.Close()
+		}
+		writeProblem(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", uploadLimitMessage(s.config.MaxUploadBytes))
+		return
+	}
+	if streamErr != nil {
+		if response != nil {
+			response.Body.Close()
+		}
+		writeProblem(w, http.StatusBadRequest, "FILE_READ_FAILED", "The selected file could not be read.")
+		return
+	}
+	if requestErr != nil {
+		writeProblem(w, http.StatusBadGateway, "BASTIONGATE_UNAVAILABLE", "BastionGate could not be reached.")
+		return
+	}
+	if response == nil {
 		writeProblem(w, http.StatusBadGateway, "BASTIONGATE_UNAVAILABLE", "BastionGate could not be reached.")
 		return
 	}
@@ -165,7 +203,7 @@ func (s *server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if response.StatusCode != http.StatusAccepted {
-		writeProblem(w, response.StatusCode, "UPLOAD_REJECTED", safeUpstreamMessage(raw))
+		writeProblem(w, response.StatusCode, "UPLOAD_REJECTED", "BastionGate rejected the upload.")
 		return
 	}
 
@@ -181,7 +219,7 @@ func (s *server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	accepted["trust"] = "UNTRUSTED"
 	accepted["correlationId"] = correlationID
 	accepted["sourceReference"] = sourceReference
-	writeJSON(w, http.StatusAccepted, accepted)
+	writeJSON(w, http.StatusAccepted, filterBrowserSafe(accepted))
 }
 
 func (s *server) handleDownload(w http.ResponseWriter, r *http.Request) {
@@ -291,8 +329,8 @@ func (s *server) proxyJSONResource(w http.ResponseWriter, r *http.Request, resou
 		writeProblem(w, http.StatusBadGateway, "INVALID_UPSTREAM_RESPONSE", "BastionGate returned invalid JSON.")
 		return
 	}
-	payload = redactSensitive(payload)
-	if includeAuditURL {
+	payload = filterBrowserSafe(payload)
+	if includeAuditURL && strings.TrimSpace(s.config.BastionGatePublicURL) != "" {
 		if object, ok := payload.(map[string]any); ok {
 			object["auditUrl"] = strings.TrimRight(s.config.BastionGatePublicURL, "/") +
 				"/files/" + url.PathEscape(fileID)
@@ -306,33 +344,54 @@ type fileStatus struct {
 	FinalVerdict string `json:"finalVerdict"`
 }
 
-var sensitiveJSONKeys = map[string]struct{}{
-	"apikey":              {},
-	"authorization":       {},
-	"locationref":         {},
-	"object_storage_path": {},
-	"quarantinebucket":    {},
-	"quarantinekey":       {},
-	"storagecredentials":  {},
-	"storageendpoint":     {},
+var browserSafeJSONKeys = map[string]struct{}{
+	"completedAt":     {},
+	"correlationId":   {},
+	"deduplicated":    {},
+	"durationMs":      {},
+	"engine":          {},
+	"engines":         {},
+	"fileId":          {},
+	"fileName":        {},
+	"finalVerdict":    {},
+	"md5":             {},
+	"mimeType":        {},
+	"name":            {},
+	"policyCode":      {},
+	"publicStatus":    {},
+	"receivedAt":      {},
+	"result":          {},
+	"scan":            {},
+	"scanEngines":     {},
+	"sha256":          {},
+	"signature":       {},
+	"sizeBytes":       {},
+	"sourceReference": {},
+	"sourceType":      {},
+	"startedAt":       {},
+	"status":          {},
+	"threatName":      {},
+	"trust":           {},
+	"updatedAt":       {},
+	"verdict":         {},
+	"version":         {},
 }
 
-func redactSensitive(value any) any {
+func filterBrowserSafe(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		clean := make(map[string]any, len(typed))
 		for key, item := range typed {
-			normalized := strings.ToLower(strings.ReplaceAll(key, "-", ""))
-			if _, sensitive := sensitiveJSONKeys[normalized]; sensitive {
+			if _, safe := browserSafeJSONKeys[key]; !safe {
 				continue
 			}
-			clean[key] = redactSensitive(item)
+			clean[key] = filterBrowserSafe(item)
 		}
 		return clean
 	case []any:
 		clean := make([]any, len(typed))
 		for index, item := range typed {
-			clean[index] = redactSensitive(item)
+			clean[index] = filterBrowserSafe(item)
 		}
 		return clean
 	default:
@@ -368,41 +427,71 @@ func (s *server) getFileStatus(ctx context.Context, fileID string) (fileStatus, 
 	return status, response.StatusCode, nil
 }
 
-func buildUpstreamUpload(
-	fileName string,
-	declaredContentType string,
-	fileBytes []byte,
+func streamUpstreamUpload(
+	file *multipart.Part,
 	policyCode string,
 	sourceReference string,
-) (*bytes.Buffer, string, error) {
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	if err := writer.WriteField("policyCode", policyCode); err != nil {
-		return nil, "", err
+	maxUploadBytes int64,
+) (io.Reader, string, <-chan error) {
+	reader, writer := io.Pipe()
+	multipartWriter := multipart.NewWriter(writer)
+	contentType := multipartWriter.FormDataContentType()
+	result := make(chan error, 1)
+
+	go func() {
+		var streamErr error
+		if streamErr = multipartWriter.WriteField("policyCode", policyCode); streamErr == nil {
+			streamErr = multipartWriter.WriteField("sourceReference", sourceReference)
+		}
+
+		var output io.Writer
+		if streamErr == nil {
+			partHeader := make(textproto.MIMEHeader)
+			partHeader.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{
+				"name":     "file",
+				"filename": file.FileName(),
+			}))
+			declaredContentType := file.Header.Get("Content-Type")
+			if declaredContentType == "" {
+				declaredContentType = "application/octet-stream"
+			}
+			partHeader.Set("Content-Type", declaredContentType)
+			output, streamErr = multipartWriter.CreatePart(partHeader)
+		}
+
+		if streamErr == nil {
+			var copied int64
+			copied, streamErr = io.Copy(output, io.LimitReader(file, maxUploadBytes+1))
+			if streamErr == nil && copied > maxUploadBytes {
+				streamErr = errFileTooLarge
+			}
+		}
+		if streamErr == nil {
+			streamErr = multipartWriter.Close()
+		}
+		if streamErr != nil {
+			_ = writer.CloseWithError(streamErr)
+		} else {
+			_ = writer.Close()
+		}
+		result <- streamErr
+		close(result)
+	}()
+
+	return reader, contentType, result
+}
+
+func supportedImageName(fileName string) bool {
+	switch strings.ToLower(filepath.Ext(fileName)) {
+	case ".jpg", ".jpeg", ".png":
+		return true
+	default:
+		return false
 	}
-	if err := writer.WriteField("sourceReference", sourceReference); err != nil {
-		return nil, "", err
-	}
-	partHeader := make(textproto.MIMEHeader)
-	partHeader.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{
-		"name":     "file",
-		"filename": fileName,
-	}))
-	if declaredContentType == "" {
-		declaredContentType = "application/octet-stream"
-	}
-	partHeader.Set("Content-Type", declaredContentType)
-	part, err := writer.CreatePart(partHeader)
-	if err != nil {
-		return nil, "", err
-	}
-	if _, err := part.Write(fileBytes); err != nil {
-		return nil, "", err
-	}
-	if err := writer.Close(); err != nil {
-		return nil, "", err
-	}
-	return &body, writer.FormDataContentType(), nil
+}
+
+func uploadLimitMessage(maxUploadBytes int64) string {
+	return fmt.Sprintf("Profile photos are limited to %d bytes.", maxUploadBytes)
 }
 
 func randomID() (string, error) {
@@ -411,22 +500,6 @@ func randomID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(value[:]), nil
-}
-
-func safeUpstreamMessage(raw []byte) string {
-	var payload struct {
-		Message string `json:"message"`
-		Error   string `json:"error"`
-	}
-	if json.Unmarshal(raw, &payload) == nil {
-		if payload.Message != "" {
-			return payload.Message
-		}
-		if payload.Error != "" {
-			return payload.Error
-		}
-	}
-	return "BastionGate rejected the upload."
 }
 
 func writeProblem(w http.ResponseWriter, status int, code string, message string) {

@@ -1,4 +1,14 @@
-import { decisionView, eicarText, isTerminal } from "./app-state.js";
+import {
+  boundedPollDelay,
+  decisionView,
+  eicarText,
+  isRetryableHTTPStatus,
+  isSupportedImage,
+  isTerminal,
+  isValidDemoConfig,
+  isValidStatusPayload,
+  retryAfterMs,
+} from "./app-state.js";
 
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
 const POLL_DEADLINE_MS = 60_000;
@@ -8,6 +18,7 @@ const $ = (selector) => document.querySelector(selector);
 const elements = {
   connectionBadge: $("#connectionBadge"),
   connectionLabel: $("#connectionLabel"),
+  uploadLimit: $("#uploadLimit"),
   fileInput: $("#fileInput"),
   dropZone: $("#dropZone"),
   eicarButton: $("#eicarButton"),
@@ -52,6 +63,10 @@ const session = {
   report: null,
   avatarURL: null,
   pollGeneration: 0,
+  config: {
+    maxUploadBytes: MAX_UPLOAD_BYTES,
+    policyCode: "DEFAULT",
+  },
 };
 
 function setStage(number) {
@@ -81,8 +96,22 @@ async function checkConnection() {
   elements.connectionBadge.dataset.state = "checking";
   elements.connectionLabel.textContent = "Checking BastionGate…";
   try {
-    const response = await fetch("/api/health", { cache: "no-store" });
-    setConnection(response.ok);
+    const [healthResponse, configResponse] = await Promise.all([
+      fetch("/api/health", { cache: "no-store" }),
+      fetch("/api/config", { cache: "no-store" }),
+    ]);
+    if (!healthResponse.ok || !configResponse.ok) {
+      setConnection(false);
+      return;
+    }
+    const config = await configResponse.json();
+    if (!isValidDemoConfig(config)) {
+      setConnection(false);
+      return;
+    }
+    session.config = config;
+    elements.uploadLimit.textContent = `${humanSize(session.config.maxUploadBytes)} max`;
+    setConnection(true);
   } catch {
     setConnection(false);
   }
@@ -94,14 +123,24 @@ function refreshUploadButton() {
 
 function humanSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1).replace(".0", "")} MiB`;
+  }
   return `${(bytes / 1024).toFixed(1)} KiB`;
 }
 
 function selectFile(file) {
   hideError();
   if (!file) return;
-  if (file.size > MAX_UPLOAD_BYTES) {
-    showError("File is too large", "Profile photos are limited to 2 MiB.");
+  if (!isSupportedImage(file)) {
+    showError("Unsupported file type", "Choose a JPG or PNG profile photo.");
+    return;
+  }
+  if (file.size > session.config.maxUploadBytes) {
+    showError(
+      "File is too large",
+      `Profile photos are limited to ${humanSize(session.config.maxUploadBytes)}.`,
+    );
     return;
   }
   session.selectedFile = file;
@@ -166,7 +205,7 @@ function renderAccepted() {
     "Authorization: Bearer ••••REDACTED••••",
     `X-Correlation-ID: ${accepted.correlationId}`,
     `file=@${session.selectedFile.name}`,
-    "policyCode=DEFAULT",
+    `policyCode=${session.config.policyCode}`,
   ].join("\n");
   elements.acceptedEvidence.textContent = JSON.stringify(
     {
@@ -191,35 +230,57 @@ async function pollUntilFinal() {
   elements.timeoutPanel.hidden = true;
 
   while (generation === session.pollGeneration && Date.now() < deadline) {
+    const controller = new AbortController();
+    const abortTimer = window.setTimeout(
+      () => controller.abort(),
+      Math.max(0, deadline - Date.now()),
+    );
+    let response;
     try {
-      const response = await fetch(`/api/files/${encodeURIComponent(session.accepted.fileId)}/status`, {
+      response = await fetch(`/api/files/${encodeURIComponent(session.accepted.fileId)}/status`, {
         cache: "no-store",
+        signal: controller.signal,
       });
-      if (response.status === 429) {
-        const retrySeconds = Number(response.headers.get("Retry-After") || "1");
-        await sleep(Math.max(1, retrySeconds) * 1000);
-        continue;
-      }
-      if (response.status >= 500) {
-        await sleep(DEFAULT_POLL_MS);
-        continue;
-      }
-      if (!response.ok) throw new Error(await readProblem(response));
-
-      session.status = await response.json();
-      updateLifecycle(session.status.status);
-      if (isTerminal(session.status)) {
-        await loadReport();
-        return;
-      }
-      await sleep(DEFAULT_POLL_MS);
     } catch (error) {
-      if (Date.now() + DEFAULT_POLL_MS >= deadline) {
-        showError("Status polling stopped", error.message);
+      if (controller.signal.aborted || Date.now() >= deadline) {
         break;
       }
-      await sleep(DEFAULT_POLL_MS);
+      await sleep(boundedPollDelay(DEFAULT_POLL_MS, deadline - Date.now()));
+      continue;
+    } finally {
+      window.clearTimeout(abortTimer);
     }
+
+    if (!response.ok) {
+      const message = await readProblem(response);
+      if (!isRetryableHTTPStatus(response.status)) {
+        showError("Status polling stopped", message);
+        return;
+      }
+      const delay =
+        response.status === 429
+          ? retryAfterMs(response.headers.get("Retry-After"))
+          : DEFAULT_POLL_MS;
+      await sleep(boundedPollDelay(delay, deadline - Date.now()));
+      continue;
+    }
+
+    try {
+      session.status = await response.json();
+    } catch {
+      showError("Status polling stopped", "BastionGate returned invalid status JSON.");
+      return;
+    }
+    if (!isValidStatusPayload(session.status)) {
+      showError("Status polling stopped", "BastionGate returned an invalid status payload.");
+      return;
+    }
+    updateLifecycle(session.status.status);
+    if (isTerminal(session.status)) {
+      await loadReport();
+      return;
+    }
+    await sleep(boundedPollDelay(DEFAULT_POLL_MS, deadline - Date.now()));
   }
   if (generation === session.pollGeneration) elements.timeoutPanel.hidden = false;
 }
@@ -310,14 +371,14 @@ async function applyReleasedAvatar() {
 
 function renderAudit() {
   const report = session.report || {};
-  elements.auditLink.href =
-    report.auditUrl || `http://localhost:8080/files/${encodeURIComponent(session.accepted.fileId)}`;
+  elements.auditLink.hidden = !report.auditUrl;
+  if (report.auditUrl) elements.auditLink.href = report.auditUrl;
   elements.rawReport.textContent = JSON.stringify(report, null, 2);
   const engine = findEngine(report);
   const facts = [
     ["Status", report.status || session.status?.status || "UNKNOWN"],
     ["Verdict", report.finalVerdict || session.status?.finalVerdict || "UNKNOWN"],
-    ["Policy", report.policyCode || "DEFAULT"],
+    ["Policy", report.policyCode || session.config.policyCode],
     ["Engine", engine?.engine || engine?.name || "—"],
     ["Signature", engine?.threatName || engine?.result || "—"],
     ["File ID", session.accepted.fileId],
