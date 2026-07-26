@@ -322,7 +322,7 @@ h2 {
 .drop-zone:hover, .drop-zone.dragging { border-color: #64748b; background: #f4f7fa; }
 .drop-zone strong { color: var(--ink); font-size: 14px; }
 .drop-zone input { position: absolute; width: 1px; height: 1px; opacity: 0; }
-.upload-icon, .file-icon, .eicar-icon {
+.upload-icon, .file-icon {
   display: grid;
   place-items: center;
   width: 32px;
@@ -365,42 +365,6 @@ h2 {
   font-weight: 850;
   letter-spacing: .06em;
 }
-.demo-divider {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  margin: 21px 0 13px;
-  color: #98a2b3;
-  font-size: 10px;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: .08em;
-}
-.demo-divider::before, .demo-divider::after {
-  content: "";
-  height: 1px;
-  flex: 1;
-  background: var(--line);
-}
-.eicar-option {
-  width: 100%;
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: center;
-  gap: 11px;
-  padding: 12px;
-  border: 1px solid #fecdd3;
-  border-radius: 10px;
-  color: var(--ink);
-  background: #fff7f8;
-  text-align: left;
-  cursor: pointer;
-}
-.eicar-option:hover { border-color: #fb7185; }
-.eicar-option small { display: block; margin-top: 3px; color: var(--muted); }
-.eicar-icon { color: var(--rose); background: #ffe4e6; }
-.safety-copy { margin: 9px 2px 17px; color: var(--muted); font-size: 10px; line-height: 1.5; }
-
 .button {
   min-height: 42px;
   display: inline-flex;

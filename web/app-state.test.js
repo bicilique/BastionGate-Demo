@@ -1,11 +1,9 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
   boundedPollDelay,
   decisionView,
-  eicarText,
   isRetryableHTTPStatus,
   isSupportedImage,
   isTerminal,
@@ -37,16 +35,6 @@ test("Postman terminal values also work when returned as status", () => {
   assert.equal(decisionView({ status: "FAILED_SCAN" }).kind, "failed");
 });
 
-test("runtime EICAR content is the exact harmless 68-byte standard", () => {
-  const content = eicarText();
-
-  assert.equal(Buffer.byteLength(content, "ascii"), 68);
-  assert.equal(
-    createHash("sha256").update(content, "ascii").digest("hex"),
-    "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f",
-  );
-});
-
 test("profile uploads require a supported image type and extension", () => {
   assert.equal(isSupportedImage({ name: "avatar.php.jpg", type: "image/jpeg" }), true);
   assert.equal(isSupportedImage({ name: "profile.png", type: "image/png" }), true);
@@ -61,7 +49,7 @@ test("malicious report produces a blocked decision with ClamAV evidence", () => 
     engines: [
       {
         engine: "CLAMAV",
-        threatName: "Eicar-Signature",
+        threatName: "Test-Signature",
       },
     ],
   });
@@ -70,7 +58,7 @@ test("malicious report produces a blocked decision with ClamAV evidence", () => 
     kind: "blocked",
     eyebrow: "MALICIOUS · BLOCKED",
     title: "Your photo was blocked",
-    summary: "ClamAV detected Eicar-Signature. The file was not released to Acme People.",
+    summary: "ClamAV detected Test-Signature. The file was not released to Acme People.",
   });
 });
 

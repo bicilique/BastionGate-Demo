@@ -4,7 +4,9 @@ test("EICAR stays untrusted, is blocked, and links to the real audit route", asy
   await page.goto("/");
   await expect(page.getByText("BastionGate connected")).toBeVisible();
 
-  await page.getByTestId("eicar-button").click();
+  await expect(page.locator("body")).not.toContainText("EICAR");
+  await expect(page.getByTestId("eicar-button")).toHaveCount(0);
+  await page.getByTestId("file-input").setInputFiles("testdata/avatar.php.jpg");
   await expect(page.locator("#selectedFileName")).toHaveText("avatar.php.jpg");
   await expect(page.getByText("UNTRUSTED", { exact: true })).toBeVisible();
 

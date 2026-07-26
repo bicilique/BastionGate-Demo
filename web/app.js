@@ -1,7 +1,6 @@
 import {
   boundedPollDelay,
   decisionView,
-  eicarText,
   isRetryableHTTPStatus,
   isSupportedImage,
   isTerminal,
@@ -21,7 +20,6 @@ const elements = {
   uploadLimit: $("#uploadLimit"),
   fileInput: $("#fileInput"),
   dropZone: $("#dropZone"),
-  eicarButton: $("#eicarButton"),
   uploadButton: $("#uploadButton"),
   selectedFile: $("#selectedFile"),
   selectedFileName: $("#selectedFileName"),
@@ -148,13 +146,6 @@ function selectFile(file) {
   elements.selectedFileMeta.textContent = `${humanSize(file.size)} · ${file.type || "unknown type"}`;
   elements.selectedFile.hidden = false;
   refreshUploadButton();
-}
-
-function createEicarDemoFile() {
-  return new File([eicarText()], "avatar.php.jpg", {
-    type: "image/jpeg",
-    lastModified: Date.now(),
-  });
 }
 
 function showError(title, message) {
@@ -413,7 +404,6 @@ function resetDemo() {
 }
 
 elements.fileInput.addEventListener("change", () => selectFile(elements.fileInput.files[0]));
-elements.eicarButton.addEventListener("click", () => selectFile(createEicarDemoFile()));
 elements.uploadButton.addEventListener("click", uploadSelectedFile);
 elements.dismissError.addEventListener("click", hideError);
 elements.retryStatus.addEventListener("click", pollUntilFinal);
