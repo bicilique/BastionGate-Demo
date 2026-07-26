@@ -75,7 +75,7 @@ docker compose down
 
 1. Open **Acme People** at <http://localhost:3000>.
 2. Confirm the connection badge is green.
-3. Select **Use the EICAR demo file**.
+3. Select **Choose a JPG or PNG**, then choose `testdata/avatar.php.jpg` from this repository.
 4. Confirm the selected filename is `avatar.php.jpg`, its size is 68 bytes, and its trust label is `UNTRUSTED`.
 5. Select **Send through BastionGate**.
 6. Observe the `202 Accepted` evidence and lifecycle status.
@@ -83,7 +83,7 @@ docker compose down
 8. Select **Continue to audit**.
 9. Open the BastionGate file audit or view the redacted technical report.
 
-The demo creates the standard EICAR test bytes in browser memory at runtime. EICAR is harmless and non-executable, but antivirus or endpoint-security software may intentionally alert when it is created or transmitted.
+The repository fixture contains the exact standard 68-byte EICAR test content. It is harmless and non-executable, is excluded from the runtime Docker image, and is never served as an application asset. Antivirus or endpoint-security software may intentionally alert when the repository is cloned or the file is transmitted.
 
 ## Run the clean-file journey
 
@@ -191,4 +191,4 @@ Use `host.docker.internal` on Docker Desktop. On supported Linux engines, Compos
 
 ## Safety boundary
 
-Use only the built-in EICAR option for the malicious-path demonstration. Do not replace it with webshells, executable payloads, or functional injection samples.
+Use only `testdata/avatar.php.jpg` for the malicious-path demonstration. Do not replace it with webshells, executable payloads, or functional injection samples.

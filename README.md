@@ -2,7 +2,7 @@
 
 Acme People is a fictional profile application that demonstrates an ordinary upload endpoint protected by a locally running BastionGate. The browser sends an Untrusted Upload to the Acme People facade, the facade streams it to BastionGate, and the application waits for a final Trust Decision before it can use the file.
 
-The built-in malicious-path demo uses only the harmless, industry-standard EICAR antivirus test file. It contains no executable code, webshell, or functional exploit payload.
+The malicious-path demo uses only the harmless, industry-standard EICAR antivirus test file stored at `testdata/avatar.php.jpg`. It contains no executable code, webshell, or functional exploit payload and is not included in the runtime image.
 
 ## Quick start
 
@@ -14,13 +14,13 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Open <http://localhost:3000>, confirm the header says **BastionGate connected**, and select **Use the EICAR demo file** to run the blocked-file journey.
+Open <http://localhost:3000>, confirm the header says **BastionGate connected**, and choose `testdata/avatar.php.jpg` through the normal profile-photo picker to run the blocked-file journey.
 
 For setup details, the clean-file journey, expected states, verification commands, and troubleshooting, see the [usage guide](docs/usage-guide.md).
 
 ## What the demo shows
 
-1. Select a JPG/PNG or generate `avatar.php.jpg` from the standard EICAR bytes at runtime.
+1. Select a JPG/PNG through the normal profile-photo picker. The repository fixture `testdata/avatar.php.jpg` exercises the blocked path.
 2. Acme People forwards the multipart upload to `POST /api/v1/files/upload`.
 3. The UI treats `202 Accepted` as untrusted and polls `/api/v1/files/{fileId}/status`.
 4. BastionGate reports a final decision and the UI retrieves the redacted trust report.
@@ -69,14 +69,14 @@ On Docker Desktop, `host.docker.internal` reaches BastionGate running on the hos
 ## Record the EICAR journey
 
 1. Confirm the header says **BastionGate connected**.
-2. Click **Use the EICAR demo file**. The screen shows `avatar.php.jpg`, 68 B, and `UNTRUSTED`.
+2. Click **Choose a JPG or PNG** and select `testdata/avatar.php.jpg`. The screen shows `avatar.php.jpg`, 68 B, and `UNTRUSTED`.
 3. Click **Send through BastionGate**.
 4. Record the accepted request, correlation ID, queue/scan progress, and final ClamAV decision.
 5. Click **Continue to audit**.
 6. Open **BastionGate file audit** in a new tab to show the real lifecycle and operator evidence.
 7. Return to Acme People for the closing `bastiongate.tech` CTA.
 
-Some endpoint-security products may intentionally alert when the browser constructs or transmits EICAR. That alert is expected scanner behavior. Do not replace EICAR with a real payload.
+Some endpoint-security products may intentionally alert when the repository is cloned or the browser transmits EICAR. That alert is expected scanner behavior. Do not replace EICAR with a real payload.
 
 ## Run without Docker
 
