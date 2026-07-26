@@ -1,0 +1,10 @@
+.env
+.idea/
+.serena/
+.superpowers/
+bin/
+coverage/
+node_modules/
+playwright-report/
+test-results/
+
