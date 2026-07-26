@@ -4,6 +4,20 @@ Acme People is a fictional profile application that demonstrates an ordinary upl
 
 The built-in malicious-path demo uses only the harmless, industry-standard EICAR antivirus test file. It contains no executable code, webshell, or functional exploit payload.
 
+## Quick start
+
+Make sure BastionGate is running locally and that you have an API-client key authorized for the selected policy. Then:
+
+```bash
+cp .env.example .env
+# Set BASTIONGATE_API_KEY in .env
+docker compose up --build
+```
+
+Open <http://localhost:3000>, confirm the header says **BastionGate connected**, and select **Use the EICAR demo file** to run the blocked-file journey.
+
+For setup details, the clean-file journey, expected states, verification commands, and troubleshooting, see the [usage guide](docs/usage-guide.md).
+
 ## What the demo shows
 
 1. Select a JPG/PNG or generate `avatar.php.jpg` from the standard EICAR bytes at runtime.
@@ -27,6 +41,8 @@ The API behavior follows the app-client Postman collection in the main BastionGa
 ```text
 docs/postman/BastionGate.app-client.postman_collection.json
 ```
+
+The facade endpoints and their BastionGate mappings are documented in the [usage guide](docs/usage-guide.md#api-flow).
 
 ## Run with Docker
 
@@ -126,4 +142,3 @@ BASTIONGATE_API_KEY=validation-only make docker-config
 - **Blocked by policy before release:** confirm `DEFAULT` accepts `.jpg` and the API client is allowed to use it. ClamAV scanning still provides the EICAR evidence in the report.
 - **Audit link opens login:** authenticate as a BastionGate operator; Acme People intentionally stores no operator credentials.
 - **File never appears as avatar:** this is correct unless BastionGate returns `RELEASED` and its controlled download succeeds.
-
