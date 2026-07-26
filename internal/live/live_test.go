@@ -95,13 +95,11 @@ func submitEICAR(t *testing.T, demoURL string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eicar := strings.Join([]string{
-		"X5O!P%@AP[4",
-		"\\PZX54(P^)7CC)7}$",
-		"EICAR-STANDARD-ANTIVIRUS-TEST-FILE",
-		"!$H+H*",
-	}, "")
-	if _, err := io.WriteString(part, eicar); err != nil {
+	eicar, err := os.ReadFile("../../testdata/avatar.php.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(eicar); err != nil {
 		t.Fatal(err)
 	}
 	if err := writer.Close(); err != nil {
