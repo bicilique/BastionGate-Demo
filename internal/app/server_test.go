@@ -399,3 +399,68 @@ func TestHealthReportsBastionGateConnectionWithoutCredentials(t *testing.T) {
 		t.Fatalf("health response leaked internal configuration: %s", body)
 	}
 }
+
+func TestHomeServesAcmePeopleWithoutServerSecrets(t *testing.T) {
+	t.Parallel()
+
+	handler, err := app.NewHandler(app.Config{
+		BastionGateInternalURL: "http://127.0.0.1:1",
+		BastionGatePublicURL:   "http://localhost:8080",
+		BastionGateAPIKey:      "server-only-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", response.StatusCode, body)
+	}
+	if !bytes.Contains(body, []byte("Acme People")) {
+		t.Fatalf("home does not identify the demo app: %s", body)
+	}
+	if bytes.Contains(body, []byte("server-only-secret")) {
+		t.Fatal("home leaked the BastionGate API key")
+	}
+	if response.Header.Get("Content-Security-Policy") == "" {
+		t.Fatal("home is missing Content-Security-Policy")
+	}
+	if response.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q", response.Header.Get("X-Content-Type-Options"))
+	}
+}
+
+func TestFaviconAssetIsAvailable(t *testing.T) {
+	t.Parallel()
+
+	handler, err := app.NewHandler(app.Config{
+		BastionGateInternalURL: "http://127.0.0.1:1",
+		BastionGatePublicURL:   "http://localhost:8080",
+		BastionGateAPIKey:      "server-only-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/favicon.svg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.StatusCode)
+	}
+	if !strings.Contains(response.Header.Get("Content-Type"), "image/svg+xml") {
+		t.Fatalf("Content-Type = %q", response.Header.Get("Content-Type"))
+	}
+}

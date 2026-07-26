@@ -16,6 +16,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	webassets "github.com/bicilique/BastionGate-Demo/web"
 )
 
 const responseLimit = 1 << 20
@@ -57,7 +59,21 @@ func NewHandler(config Config) (http.Handler, error) {
 	mux.HandleFunc("GET /api/files/{fileID}/status", s.handleStatus)
 	mux.HandleFunc("GET /api/files/{fileID}/report", s.handleReport)
 	mux.HandleFunc("GET /api/files/{fileID}/download", s.handleDownload)
-	return mux, nil
+	mux.Handle("/", http.FileServer(http.FS(webassets.Files)))
+	return secureHeaders(mux), nil
+}
+
+func secureHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy",
+			"default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; "+
+				"form-action 'self'; frame-ancestors 'none'; img-src 'self' blob:; "+
+				"object-src 'none'; script-src 'self'; style-src 'self'")
+		w.Header().Set("Permissions-Policy", "camera=(), geolocation=(), microphone=()")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {

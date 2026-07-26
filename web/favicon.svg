@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Acme People">
+  <rect width="64" height="64" rx="17" fill="#172033"/>
+  <path d="M18 47 28.4 17h7.2L46 47h-7.4l-2-6.4h-9.3L25.4 47Zm11.2-12.5h5.6L32 25.2Z" fill="#fff"/>
+</svg>
